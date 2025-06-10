@@ -58,7 +58,7 @@ export default function ChatPage() {
   const connectWebSocket = (connectRegion: Region | 'none', connectLanguage: Language) => {
     if (IS_MOCK_API) {
       console.log("Mock mode: connectWebSocket called.");
-      setIsBotLoading(true);
+      setIsBotLoading(true); // Indicates connection attempt or bot action
       const mockLiveId = `mock-live-${uuidv4()}`;
       const newMockLiveSession: ChatSession = {
         id: mockLiveId,
@@ -69,19 +69,18 @@ export default function ChatPage() {
         title: `New Chat (${connectRegion === 'none' ? 'No Region' : connectRegion}, ${connectLanguage})`,
       };
       
-      // If there was an old live session with messages, keep it. Otherwise, it might be replaced.
       setChatSessions(prev => {
         const sessionsWithoutOldEmptyLive = prev.filter(s => !(s.id === activeLiveSessionId && s.messages.length === 0));
         return [newMockLiveSession, ...sessionsWithoutOldEmptyLive].sort((a, b) => new Date(b.startTime).getTime() - new Date(a.startTime).getTime());
       });
       setActiveLiveSessionId(mockLiveId);
       setCurrentViewSessionId(mockLiveId);
-      setIsBotLoading(false);
+      setIsBotLoading(false); // Mock connection is "instant"
 
       if (pendingMessageForSend) {
         console.log(`Mock: Processing pending message for new session ${mockLiveId}: ${pendingMessageForSend.text}`);
-        // Simulate sending this pending message
-        handleSendMessage(pendingMessageForSend.text, true); // Pass a flag to avoid re-queueing
+        // Simulate sending this pending message. handleSendMessage will set isBotLoading again.
+        handleSendMessage(pendingMessageForSend.text, true); 
         setPendingMessageForSend(null);
       }
       return;
@@ -92,11 +91,12 @@ export default function ChatPage() {
         socketRef.current.close();
     }
     socketRef.current = null;
-    setIsBotLoading(true);
+    setIsBotLoading(true); // Attempting to connect
   
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${wsProtocol}//${window.location.host}/api/ws`;
-  
+    // const wsUrl = `${wsProtocol}//${window.location.host}/api/ws`;
+    const wsUrl = `ws//localhost:9001/api/ws`; // Ensure this matches your backend
+
     console.log(`Attempting to connect WebSocket to ${wsUrl}`);
     const ws = new WebSocket(wsUrl);
     socketRef.current = ws; 
@@ -104,8 +104,7 @@ export default function ChatPage() {
     ws.onopen = () => {
       console.log('WebSocket connection established. Waiting for InitiateConversationResponse.');
       // Server is expected to send InitiateConversationResponse automatically.
-      // If a message was pending because send was clicked before socket fully ready (after InitiateConversationResponse)
-      // it will be handled once InitiateConversationResponse sets activeLiveSessionId.
+      // isBotLoading remains true until InitiateConversationResponse or error.
     };
   
     ws.onmessage = (event) => {
@@ -125,23 +124,36 @@ export default function ChatPage() {
             title: `New Chat (${connectRegion === 'none' ? 'No Region' : connectRegion}, ${connectLanguage})`,
           };
 
+          if (pendingMessageForSend) {
+            const userMessageForPending: ChatMessage = {
+              id: uuidv4(),
+              sender: 'user',
+              text: pendingMessageForSend.text,
+              timestamp: new Date(),
+            };
+            newLiveSession.messages.push(userMessageForPending);
+            if (newLiveSession.messages.length === 1) { // Set title from first message
+                 newLiveSession.title = pendingMessageForSend.text.substring(0,30) + (pendingMessageForSend.text.length > 30 ? '...' : '');
+            }
+          }
+
           setChatSessions(prev => {
             const sessionsWithoutOldEmptyLive = prev.filter(s => !(s.id === activeLiveSessionId && s.messages.length === 0));
             return [newLiveSession, ...sessionsWithoutOldEmptyLive].sort((a,b) => new Date(b.startTime).getTime() - new Date(a.startTime).getTime());
           });
           setActiveLiveSessionId(newConversationId);
           setCurrentViewSessionId(newConversationId);
-          setIsBotLoading(false); // Connection is ready, not waiting for a message reply yet
+          // If no pending message, connection is ready and not waiting for a reply yet.
+          // If there IS a pending message, it will be sent, and isBotLoading should remain true.
+          setIsBotLoading(!!pendingMessageForSend); 
 
           if (pendingMessageForSend) {
             console.log(`Processing pending message for new session ${newConversationId}: ${pendingMessageForSend.text}`);
-            // The user message for pendingMessageForSend would have already been added optimistically.
-            // We just need to send it to the server.
             socketRef.current?.send(JSON.stringify({
               type: 'SubmitQuestionRequest',
-              data: { question: pendingMessageForSend.text, region: connectRegion }
+              data: { question: pendingMessageForSend.text, region: newLiveSession.region }
             }));
-            // isBotLoading is already true from handleSendMessage if pendingMessageForSend was set.
+            // isBotLoading is already true from the logic above.
             setPendingMessageForSend(null);
           }
   
@@ -155,12 +167,12 @@ export default function ChatPage() {
           };
           setChatSessions(prev =>
             prev.map(session =>
-              session.id === activeLiveSessionId // Bot responses always go to the active live session
+              session.id === activeLiveSessionId 
                 ? { ...session, messages: [...session.messages, botMessage] }
                 : session
             )
           );
-          setIsBotLoading(false);
+          setIsBotLoading(false); // Bot has replied
   
         } else if (serverMessage.type === 'Error') {
           toast({
@@ -183,8 +195,8 @@ export default function ChatPage() {
       console.error('WebSocket error:', errorEvent);
       toast({ title: 'WebSocket Connection Error', description: 'Could not connect to the chat server.', variant: 'destructive' });
       setIsBotLoading(false);
-      setActiveLiveSessionId(null); // Indicate no active connection
-      if (pendingMessageForSend) setPendingMessageForSend(null);
+      setActiveLiveSessionId(null); 
+      if (pendingMessageForSend) setPendingMessageForSend(null); // Clear pending if connection fails
       if (socketRef.current === ws) { 
           socketRef.current = null;
       }
@@ -192,27 +204,24 @@ export default function ChatPage() {
   
     ws.onclose = (closeEvent) => {
       console.log('WebSocket connection closed:', closeEvent.code, closeEvent.reason);
-      if (closeEvent.code !== 1000 && closeEvent.code !== 1005 && !closeEvent.wasClean) { 
-         // toast({ title: 'WebSocket Closed Unexpectedly', description: `Code: ${closeEvent.code}`, variant: 'warning' });
-      }
-      // Don't set activeLiveSessionId to null here unless it was an error,
-      // as it might be a clean close before a new connection (e.g. region change)
-      //setIsBotLoading(false); // Only if it was an unexpected close
       if (socketRef.current === ws) { 
         socketRef.current = null;
       }
-       if (pendingMessageForSend && !socketRef.current) { // If still pending and socket is truly gone
+      // If there was a pending message and the close was unexpected, stop loading.
+      if (pendingMessageForSend && (closeEvent.code !== 1000 && !closeEvent.wasClean)) {
         setIsBotLoading(false);
-        // setPendingMessageForSend(null); // Keep it, user might retry
+        // Don't clear pendingMessageForSend here, user might retry or connect again.
+        toast({ title: 'Connection Closed', description: 'Chat disconnected. Please try sending your message again.', variant: 'warning' });
+      } else if (!activeLiveSessionId && !IS_MOCK_API) { // If no active session was ever established.
+        setIsBotLoading(false);
       }
     };
   };
   
-  // Effect for initial connection and cleanup
   useEffect(() => {
-    if (typeof window !== 'undefined') { // Ensure running on client
+    if (typeof window !== 'undefined') { 
         console.log("Initial effect: IS_MOCK_API:", IS_MOCK_API, "activeLiveSessionId:", activeLiveSessionId);
-        if (!activeLiveSessionId) { // Connect only if no active session yet
+        if (!activeLiveSessionId && !socketRef.current) { 
             connectWebSocket(region, language);
         }
     }
@@ -220,12 +229,12 @@ export default function ChatPage() {
     return () => {
       if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
         socketRef.current.send(JSON.stringify({ type: 'Close', data: {} }));
-        socketRef.current.close();
+        socketRef.current.close(1000, "Component unmounting");
       }
       socketRef.current = null;
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // Intentionally empty: connect once on mount. Region/lang changes handled separately.
+  }, []); 
 
 
   const currentMessages = useMemo(() => {
@@ -242,7 +251,6 @@ export default function ChatPage() {
     setCurrentViewSessionId(sessionId);
   };
   
-  // Auto-select the latest session (which should be the live one if available) for view if nothing is selected.
   useEffect(() => {
     if (!currentViewSessionId && chatSessions.length > 0) {
         const sortedSessions = [...chatSessions].sort((a, b) => new Date(b.startTime).getTime() - new Date(a.startTime).getTime());
@@ -251,7 +259,6 @@ export default function ChatPage() {
             setCurrentViewSessionId(latestSessionId);
         }
     } else if (currentViewSessionId && !chatSessions.find(s => s.id === currentViewSessionId)) {
-        // If currentViewSessionId points to a session that no longer exists (e.g. after filtering), select active or latest
         const newTarget = activeLiveSessionId || (chatSessions.length > 0 ? chatSessions.sort((a,b) => new Date(b.startTime).getTime() - new Date(a.startTime).getTime())[0].id : null);
         setCurrentViewSessionId(newTarget);
     }
@@ -259,32 +266,38 @@ export default function ChatPage() {
 
 
   const handleRegionLanguageChange = (newRegion: Region | 'none', newLanguage: Language) => {
-    setRegion(newRegion);
-    setLanguage(newLanguage);
-    // Preserve old live session in history if it had messages
     const oldLiveSession = chatSessions.find(s => s.id === activeLiveSessionId);
     if (oldLiveSession && oldLiveSession.messages.length === 0) {
         setChatSessions(prev => prev.filter(s => s.id !== activeLiveSessionId));
     }
-    setActiveLiveSessionId(null); // Force new connection
-    connectWebSocket(newRegion, newLanguage);
+    
+    setRegion(newRegion);
+    setLanguage(newLanguage);
+    setActiveLiveSessionId(null); // Indicate previous session is no longer "live" for new messages
+    if (pendingMessageForSend) {
+        // If a message was pending, and user changes region/lang, it's best to clear it or notify user.
+        // For now, let's clear it and let them re-send if they wish.
+        setPendingMessageForSend(null);
+        toast({ title: "Action Interrupted", description: "Region/language changed. Please resend your message if needed.", variant: "default"});
+    }
+    connectWebSocket(newRegion, newLanguage); // This will set new activeLiveSessionId
   };
 
 
   const handleSendMessage = (text: string, isProcessingPending: boolean = false) => {
-    if (!isProcessingPending) { // For normal sends, set loading. For pending, it's already loading.
-        setIsBotLoading(true);
+    if (!isProcessingPending) { 
+        setIsBotLoading(true); // Set loading for a new user message.
     }
 
     if (IS_MOCK_API) {
       if (!activeLiveSessionId) {
-        console.error("Mock mode: No activeLiveSessionId to send message to.");
-        // Attempt to re-establish mock session if lost
+        console.warn("Mock mode: No activeLiveSessionId. Attempting to connect and queue message.");
+        if (!pendingMessageForSend && !isProcessingPending) setPendingMessageForSend({ text });
         connectWebSocket(region, language); 
-        // Queue message
-        if (!pendingMessageForSend) setPendingMessageForSend({ text });
+        // User message will be added by the pending flow in connectWebSocket -> handleSendMessage(..., true)
         return;
       }
+
       const userMessage: ChatMessage = {
         id: uuidv4(),
         sender: 'user',
@@ -295,16 +308,18 @@ export default function ChatPage() {
       setChatSessions(prev =>
         prev.map(s =>
           s.id === activeLiveSessionId
-            ? { ...s, messages: [...s.messages, userMessage], title: (s.messages.length === 0 && !s.title.startsWith("Live Chat")) || s.messages.length === 0 ? text.substring(0, 30) + (text.length > 30 ? '...' : '') : s.title }
+            ? { ...s, messages: [...s.messages, userMessage], title: (s.messages.length === 0 && !s.title.startsWith("New Chat")) ? text.substring(0, 30) + (text.length > 30 ? '...' : '') : s.title }
             : s
         )
       );
-      setCurrentViewSessionId(activeLiveSessionId); // Ensure view focuses on live session
+      setCurrentViewSessionId(activeLiveSessionId); 
 
+      // Simulate bot reply
       setTimeout(() => {
         const questionId = uuidv4();
+        const mockSessionDetails = chatSessions.find(s=>s.id===activeLiveSessionId);
         const mockAnswerHtml = `
-          <p>Mock answer for "${text}" in region ${chatSessions.find(s=>s.id===activeLiveSessionId)?.region || 'N/A'} (Session: ${activeLiveSessionId}, Message: ${questionId}). The guidelines for underwriting hotels include the follow: abcdefg</p>
+          <p>Mock answer for "${text}" in region ${mockSessionDetails?.region || 'N/A'} (Session: ${activeLiveSessionId}, QID: ${questionId}). The guidelines for underwriting hotels include the follow: abcdefg</p>
           <p><strong>Sources:</strong></p>
           <ul><li><a href="http://www.google.com/" target="_blank" rel="noopener noreferrer">Lodging</a> (Document, Score: 0.5, File: /tmp/tmp.html)</li></ul>
           <p><strong>Other Related:</strong></p>
@@ -322,15 +337,20 @@ export default function ChatPage() {
     }
 
     // Real WebSocket logic
-    if (!activeLiveSessionId) {
-      toast({ title: "Connection Issue", description: "No active chat session. Trying to connect...", variant: "default" });
-      if (!isProcessingPending && !pendingMessageForSend) setPendingMessageForSend({ text }); // Queue if not already processing a pending one
-      connectWebSocket(region, language); // Attempt to establish connection
-      // User message is not added optimistically here, will be added by pending logic if connection succeeds
+    if (!activeLiveSessionId && !isProcessingPending) { // Message sent before initial connection fully established
+      toast({ title: "Connecting...", description: "Establishing chat session. Your message will be sent shortly.", variant: "default" });
+      if (!pendingMessageForSend) setPendingMessageForSend({ text }); 
+      // connectWebSocket should already be in progress from useEffect or prior attempt. If not, this might be an issue.
+      // Let's ensure a connection attempt is running if we queue a message here.
+      if (!socketRef.current || (socketRef.current.readyState !== WebSocket.OPEN && socketRef.current.readyState !== WebSocket.CONNECTING)) {
+        connectWebSocket(region, language);
+      }
+      // User message is NOT added optimistically here for real WS if no active session. It's handled by InitiateConversationResponse if pending.
+      // isBotLoading is already true.
       return;
     }
     
-    // Optimistically add user message only if not already processing a pending one that did this
+    // If this is not a pending message being processed, add user message optimistically
     if (!isProcessingPending) {
         const userMessage: ChatMessage = {
             id: uuidv4(),
@@ -341,26 +361,28 @@ export default function ChatPage() {
         setChatSessions(prev =>
             prev.map(s =>
             s.id === activeLiveSessionId
-                ? { ...s, messages: [...s.messages, userMessage], title: (s.messages.length === 0 && !s.title.startsWith("Live Chat")) || s.messages.length === 0 ? text.substring(0, 30) + (text.length > 30 ? '...' : '') : s.title }
+                ? { ...s, messages: [...s.messages, userMessage], title: (s.messages.length === 0 && !s.title.startsWith("New Chat")) ? text.substring(0, 30) + (text.length > 30 ? '...' : '') : s.title }
                 : s
             )
         );
-        setCurrentViewSessionId(activeLiveSessionId); // Focus on live session
+        setCurrentViewSessionId(activeLiveSessionId); 
     }
 
 
     if (!socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) {
-      if (!isProcessingPending && !pendingMessageForSend) {
+      if (!isProcessingPending && !pendingMessageForSend) { // If not already pending, make it pending
         setPendingMessageForSend({ text });
+         toast({ title: "Reconnecting...", description: "Connection issue. Trying to send your message.", variant: "default" });
       }
-      // If socket is connecting, message is queued and will be sent on open if InitiateConversationResponse is successful
       if (socketRef.current?.readyState === WebSocket.CONNECTING) {
-        console.log("Socket connecting, message queued.");
+        console.log("Socket connecting, message already queued or will be sent on open by InitiateConversationResponse.");
+        // isBotLoading is already true.
         return;
       }
-      // If socket is closed or null, try to reconnect
-      console.log("Socket not open, attempting to reconnect and send pending message.");
-      connectWebSocket(chatSessions.find(s => s.id === activeLiveSessionId)?.region || region, chatSessions.find(s => s.id === activeLiveSessionId)?.language || language);
+      console.log("Socket not open, attempting to reconnect to send message.");
+      const currentSessionForReconnect = chatSessions.find(s => s.id === activeLiveSessionId);
+      connectWebSocket(currentSessionForReconnect?.region || region, currentSessionForReconnect?.language || language);
+      // isBotLoading is already true.
       return;
     }
 
@@ -375,12 +397,19 @@ export default function ChatPage() {
       type: 'SubmitQuestionRequest',
       data: { question: text, region: currentLiveSession.region }
     }));
+    // isBotLoading is already true.
   };
 
   const isInputAreaDisabled = useMemo(() => {
-    if (IS_MOCK_API) return isBotLoading; // In mock mode, input is enabled unless bot is "typing"
+    if (IS_MOCK_API && !activeLiveSessionId && pendingMessageForSend) return false; // Allow typing if mock and pending first message
+    if (IS_MOCK_API) return isBotLoading; 
+    
+    // For real WS:
+    // Disable if bot is loading (either connecting or replying)
+    // OR if there's no active live session established yet (e.g. initial connection failed or ongoing)
+    // OR if the user is viewing a historical session.
     return isBotLoading || !activeLiveSessionId || (currentViewSessionId !== activeLiveSessionId);
-  }, [isBotLoading, activeLiveSessionId, currentViewSessionId]);
+  }, [isBotLoading, activeLiveSessionId, currentViewSessionId, pendingMessageForSend]);
 
   return (
     <div className="flex flex-col h-screen bg-background text-foreground">
@@ -401,16 +430,16 @@ export default function ChatPage() {
           <ChatArea
             messages={currentMessages}
             onSendMessage={handleSendMessage}
-            currentLanguage={language} // For placeholder text
-            isLoading={isBotLoading} // For "Bot is typing..."
-            isInputDisabled={isInputAreaDisabled} // To disable input field
+            currentLanguage={language} 
+            isLoading={isBotLoading} 
+            isInputDisabled={isInputAreaDisabled} 
           />
         </div>
         {showHistory && (
           <HistoryPanel
             sessions={chatSessions}
-            currentSessionId={currentViewSessionId} // Highlight based on view
-            activeLiveSessionId={activeLiveSessionId} // Could be used for special styling for live
+            currentSessionId={currentViewSessionId} 
+            activeLiveSessionId={activeLiveSessionId} 
             onSelectSession={handleSelectSession}
           />
         )}
@@ -419,3 +448,4 @@ export default function ChatPage() {
     </div>
   );
 }
+
