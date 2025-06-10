@@ -65,6 +65,8 @@ export default {
           border: 'hsl(var(--sidebar-border))',
           ring: 'hsl(var(--sidebar-ring))',
         },
+        'chat-panel-background': 'hsl(var(--chat-panel-background))',
+        'history-panel-background': 'hsl(var(--history-panel-background))',
       },
       borderRadius: {
         lg: 'var(--radius)',
