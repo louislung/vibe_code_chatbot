@@ -10,6 +10,8 @@ import { Toaster } from "@/components/ui/toaster";
 import { useToast } from "@/hooks/use-toast";
 import { v4 as uuidv4 } from 'uuid';
 
+const IS_MOCK_API = process.env.NEXT_PUBLIC_MOCK_API === 'true';
+
 // Mock initial data - these are historical, view-only unless a new chat is started
 const initialChatSessions: ChatSession[] = [
   {
@@ -51,6 +53,12 @@ export default function ChatPage() {
   const socketRef = useRef<WebSocket | null>(null);
   const [pendingMessage, setPendingMessage] = useState<{ text: string; region: Region | 'none'; language: Language, tempSessionId: string } | null>(null);
 
+  useEffect(() => {
+    if (IS_MOCK_API) {
+      console.log("Running in MOCK API mode.");
+    }
+  }, []);
+
   const currentMessages = useMemo(() => {
     if (!currentSessionId) return [];
     const session = chatSessions.find(s => s.id === currentSessionId);
@@ -65,36 +73,43 @@ export default function ChatPage() {
     const session = chatSessions.find(s => s.id === sessionId);
     if (session) {
       setCurrentSessionId(sessionId);
-      // If switching to a session that had an active websocket, we might want to close it
-      // as new messages will start a new WebSocket conversation.
-      // For now, selecting history is view-only. A new message always implies a new WebSocket interaction if not already on one.
     }
   };
   
   useEffect(() => {
-    // Select the latest session if no current session is selected and sessions exist
     if (!currentSessionId && chatSessions.length > 0) {
         const sortedSessions = [...chatSessions].sort((a, b) => new Date(b.startTime).getTime() - new Date(a.startTime).getTime());
         if (sortedSessions.length > 0) {
-            setCurrentSessionId(sortedSessions[0].id);
+            const latestSession = sortedSessions[0];
+            // In mock mode, if latest session is not a mock session, don't auto-select for interaction to avoid confusion.
+            // User must send a message to start a mock interaction.
+            if (IS_MOCK_API && latestSession && !latestSession.id.startsWith('mock-')) {
+                // Do not auto-select non-mock historical sessions in mock mode for active chat
+            } else {
+                 setCurrentSessionId(latestSession.id);
+            }
         }
     }
   }, [chatSessions, currentSessionId]);
 
 
   const connectWebSocket = () => {
-    // setIsBotLoading(true); // Moved to handleSendMessage to ensure UI updates before connection attempt
+    if (IS_MOCK_API) {
+      console.log('Mock mode: connectWebSocket called. Actual connection handled by mock logic in handleSendMessage.');
+      // If a pending message was set (which happens before connectWebSocket is called),
+      // the mock handleSendMessage will simulate the bot's response including "initiation".
+      // No direct action needed here for mock mode as handleSendMessage orchestrates the mock flow.
+      return;
+    }
   
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${wsProtocol}//${window.location.host}/ws`;
-    // For local dev with backend on different port, e.g.: const wsUrl = `ws://localhost:8000/ws`;
+    const wsUrl = `${wsProtocol}//${window.location.host}/api/ws`;
   
     const ws = new WebSocket(wsUrl);
-    socketRef.current = ws; // Assign early to prevent race conditions with onclose
+    socketRef.current = ws; 
   
     ws.onopen = () => {
       console.log('WebSocket connection established');
-      // Server should automatically send InitiateConversationResponse
     };
   
     ws.onmessage = (event) => {
@@ -166,25 +181,22 @@ export default function ChatPage() {
       toast({ title: 'WebSocket Connection Error', variant: 'destructive' });
       setIsBotLoading(false);
       if (pendingMessage) setPendingMessage(null);
-      if (socketRef.current === ws) { // Check if it's the current socket
+      if (socketRef.current === ws) { 
           socketRef.current = null;
       }
     };
   
     ws.onclose = (closeEvent) => {
       console.log('WebSocket connection closed:', closeEvent.code, closeEvent.reason);
-      // Only show toast for unexpected closures.
       if (closeEvent.code !== 1000 && closeEvent.code !== 1005 && !closeEvent.wasClean) { 
         // toast({ title: 'WebSocket Closed Unexpectedly', description: `Code: ${closeEvent.code}`, variant: 'warning' });
       }
       setIsBotLoading(false);
       if (pendingMessage && socketRef.current !== ws) { 
-        // If pending message exists and this onclose is for an old socket, do not clear the pending message for the new one.
       } else if (pendingMessage) {
-        // If it's the current socket or no specific check, clear if pending.
         setPendingMessage(null);
       }
-      if (socketRef.current === ws) { // Only clear if it's the current socket closing
+      if (socketRef.current === ws) { 
         socketRef.current = null;
       }
     };
@@ -192,26 +204,112 @@ export default function ChatPage() {
 
   useEffect(() => {
     return () => {
-      if (socketRef.current) {
+      if (socketRef.current && !IS_MOCK_API) {
         if (socketRef.current.readyState === WebSocket.OPEN) {
             socketRef.current.send(JSON.stringify({ type: 'Close', data: {} }));
         }
         socketRef.current.close();
         socketRef.current = null;
+      } else if (IS_MOCK_API) {
+        console.log("Mock WebSocket: unmounting, no real connection to close.");
       }
     };
   }, []);
 
   const handleSendMessage = (text: string) => {
-    setIsBotLoading(true); // Set loading true at the beginning of send action
+    setIsBotLoading(true);
 
+    if (IS_MOCK_API) {
+      const userMessage: ChatMessage = {
+        id: uuidv4(),
+        sender: 'user',
+        text,
+        timestamp: new Date(),
+      };
+
+      let targetSessionId = currentSessionId;
+      let isNewMockConversation = false;
+      const existingSession = currentSessionId ? chatSessions.find(s => s.id === currentSessionId) : null;
+
+      // Determine if this is a new mock conversation or continuation of an existing mock one
+      if (!existingSession || !existingSession.id.startsWith('mock-')) {
+        isNewMockConversation = true;
+        targetSessionId = `mock-${uuidv4()}`; // Always create a new ID for a new mock interaction flow
+      }
+      // If existingSession.id starts with 'mock-', targetSessionId is already correct.
+
+      if (isNewMockConversation) {
+        console.log(`Mock: Starting new conversation flow. Conversation ID will be ${targetSessionId}. Simulating InitiateConversationResponse.`);
+        // Simulate adding the user message to a new session
+        const newMockSession: ChatSession = {
+          id: targetSessionId!, // Assert targetSessionId is not null
+          startTime: new Date(),
+          language: language, // Use current global language
+          region: region,     // Use current global region
+          messages: [userMessage],
+          title: text.substring(0, 30) + (text.length > 30 ? '...' : ''),
+        };
+        setChatSessions(prev => [newMockSession, ...prev].sort((a,b) => new Date(b.startTime).getTime() - new Date(a.startTime).getTime()));
+        setCurrentSessionId(targetSessionId!);
+      } else {
+        // Add user message to existing mock session
+        setChatSessions(prev =>
+          prev.map(session =>
+            session.id === targetSessionId
+              ? { ...session, messages: [...session.messages, userMessage] }
+              : session
+          )
+        );
+      }
+      
+      // Simulate bot response after a delay
+      setTimeout(() => {
+        const questionId = uuidv4();
+        const mockAnswerHtml = `
+          <p>Mock answer for "${text}" in region ${region === 'none' ? 'not specified' : region} (Session: ${targetSessionId}, Message: ${questionId}). The guidelines for underwriting hotels include the follow: abcdefg</p>
+          <p><strong>Sources:</strong></p>
+          <ul>
+            <li>
+              <a href="http://www.google.com/" target="_blank" rel="noopener noreferrer">Lodging</a>
+              (Document, Score: 0.5, File: /tmp/tmp.html)
+            </li>
+          </ul>
+          <p><strong>Other Related:</strong></p>
+          <ul>
+            <li>
+              <a href="http://intactfc.com/" target="_blank" rel="noopener noreferrer">Intact Insurance</a>
+              (Document, Score: 0.678, File: /tmp/tmp2.html)
+            </li>
+          </ul>`;
+
+        const botMessage: ChatMessage = {
+          id: questionId, 
+          sender: 'bot',
+          text: mockAnswerHtml, 
+          timestamp: new Date(),
+        };
+
+        setChatSessions(prev =>
+          prev.map(session =>
+            session.id === targetSessionId
+              ? { ...session, messages: [...session.messages, botMessage] }
+              : session
+          )
+        );
+        setIsBotLoading(false);
+        console.log(`Mock: SubmitQuestionResponse sent for question in session ${targetSessionId}.`);
+      }, 1000 + (isNewMockConversation ? 300 : 0)); // Slightly longer delay if "initiating"
+
+      return; // End of mock logic
+    }
+
+    // Real WebSocket logic from here
     const currentActiveSession = chatSessions.find(s => s.id === currentSessionId);
-    // Check if the socket is open and currentSessionId matches an actual session that has server interaction (e.g. bot messages)
     const isSocketOpenAndValidForCurrentSession = 
       socketRef.current &&
       socketRef.current.readyState === WebSocket.OPEN &&
       currentActiveSession &&
-      currentActiveSession.messages.some(m => m.sender === 'bot'); // A simple heuristic: if a bot has replied, it's server-backed
+      currentActiveSession.messages.some(m => m.sender === 'bot');
 
 
     if (isSocketOpenAndValidForCurrentSession && currentActiveSession) {
@@ -233,13 +331,11 @@ export default function ChatPage() {
         data: { question: text, region: currentActiveSession.region }
       }));
     } else {
-      // This is a new conversation or continuing a view-only historical chat
       if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
-        console.log("Closing stale/previous WebSocket connection.");
         socketRef.current.send(JSON.stringify({ type: 'Close', data: {} }));
-        socketRef.current.close(); // Intentionally close previous before making new
+        socketRef.current.close(); 
       }
-      socketRef.current = null; // Ensure ref is cleared before new connection
+      socketRef.current = null; 
 
       const tempSessionId = uuidv4();
       const userMessageForNewChatUI: ChatMessage = {
@@ -251,8 +347,8 @@ export default function ChatPage() {
       const newTempSession: ChatSession = {
         id: tempSessionId,
         startTime: new Date(),
-        language, // Use current global language from header
-        region,   // Use current global region from header
+        language, 
+        region,   
         messages: [userMessageForNewChatUI],
         title: text.substring(0, 30) + (text.length > 30 ? '...' : ''),
       };
@@ -261,8 +357,7 @@ export default function ChatPage() {
       setCurrentSessionId(tempSessionId);
   
       setPendingMessage({ text, region, language, tempSessionId });
-      // setIsBotLoading(true); // Already set at the start of function
-      connectWebSocket(); // This will handle the rest
+      connectWebSocket(); 
     }
   };
 
@@ -301,5 +396,3 @@ export default function ChatPage() {
     </div>
   );
 }
-
-    
