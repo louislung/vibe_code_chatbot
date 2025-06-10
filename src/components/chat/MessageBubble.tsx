@@ -1,3 +1,4 @@
+
 "use client";
 
 import type { ChatMessage } from "@/lib/types";
@@ -12,6 +13,9 @@ interface MessageBubbleProps {
 
 export function MessageBubble({ message }: MessageBubbleProps) {
   const isUser = message.sender === 'user';
+
+  // Ensure timestamp is a Date object before formatting
+  const messageTimestamp = message.timestamp instanceof Date ? message.timestamp : new Date(message.timestamp);
 
   return (
     <div className={cn("flex items-end gap-2 mb-4", isUser ? "justify-end" : "justify-start")}>
@@ -28,9 +32,14 @@ export function MessageBubble({ message }: MessageBubbleProps) {
           isUser ? "bg-primary text-primary-foreground rounded-br-none" : "bg-secondary text-secondary-foreground rounded-bl-none"
         )}
       >
-        <p className="whitespace-pre-wrap">{message.text}</p>
+        {isUser ? (
+          <p className="whitespace-pre-wrap">{message.text}</p>
+        ) : (
+          // Bot messages might contain HTML as per API spec ("answer": "<html string>")
+          <div dangerouslySetInnerHTML={{ __html: message.text }} />
+        )}
         <p className={cn("text-xs mt-1", isUser ? "text-primary-foreground/70" : "text-muted-foreground/80")}>
-          {format(message.timestamp, "p")}
+          {format(messageTimestamp, "p")}
         </p>
       </div>
       {isUser && (
@@ -43,3 +52,5 @@ export function MessageBubble({ message }: MessageBubbleProps) {
     </div>
   );
 }
+
+    
